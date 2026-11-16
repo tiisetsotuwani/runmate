@@ -1,0 +1,40 @@
+name: Preview native builds
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-preview
+  cancel-in-progress: false
+jobs:
+  build:
+    if: vars.ENABLE_EAS_BUILDS == 'true' && github.ref == 'refs/heads/main'
+    environment: preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      EXPO_OWNER: ${{ vars.EXPO_OWNER }}
+      EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Require owner configuration
+        run: |
+          test -n "$EXPO_TOKEN" || { echo "::error::Expo token missing"; exit 1; }
+          test -n "$EXPO_OWNER" || { echo "::error::Expo owner missing"; exit 1; }
+          test -n "$EAS_PROJECT_ID" || { echo "::error::Expo project ID missing"; exit 1; }
+          test -f package-lock.json || { echo "::error::Commit the verified dependency lock before native builds"; exit 1; }
+      - run: npm ci
+      - run: npm run check
+      - run: npx expo install --check
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Android APK and iOS simulator build
+        run: eas build --platform all --profile preview --non-interactive
