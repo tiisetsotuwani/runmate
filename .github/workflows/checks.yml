@@ -24,6 +24,10 @@ jobs:
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Dependency audit report
+        run: |
+          npm audit --json > dependency-audit.json || true
+          node -e "const a=require('./dependency-audit.json'); console.log(JSON.stringify(a.metadata)); for(const [name,v] of Object.entries(a.vulnerabilities||{})) if(v.severity==='high'||v.severity==='critical') console.log(name,JSON.stringify(v));"
       - name: Type check
         run: npm run typecheck
       - name: Expo compatibility
@@ -33,9 +37,12 @@ jobs:
       - name: Bundle iOS
         run: npm run bundle:ios
       - name: Save resolved dependency lock
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dependency-lock
-          path: package-lock.json
+          path: |
+            package-lock.json
+            dependency-audit.json
           if-no-files-found: error
           retention-days: 7

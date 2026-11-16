@@ -1,6 +1,7 @@
 import {existsSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
-if (Number(process.versions.node.split('.')[0]) < 22) {
+const [major,minor]=process.versions.node.split('.').map(Number);
+if (major<22 || (major===22 && minor<14)) {
   console.error('Use Node.js 22.14 or newer.'); process.exit(1);
 }
 const npm=process.platform==='win32'?'npm.cmd':'npm';
