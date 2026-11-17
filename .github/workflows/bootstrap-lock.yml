@@ -21,7 +21,10 @@ jobs:
         with:
           node-version: '22'
       - name: Resolve lock without running dependency scripts
-        run: npm install --package-lock-only --ignore-scripts
+        run: |
+          npm audit fix --package-lock-only --ignore-scripts || true
+          git diff --exit-code -- package.json
+          npm audit --audit-level=high
       - name: Commit lock only when branch has not moved
         uses: actions/github-script@v7
         with:
@@ -32,13 +35,10 @@ jobs:
             const branch = 'codex/apprunmate-foundation';
             const ref = await github.rest.git.getRef({owner,repo,ref:'heads/'+branch});
             if(ref.data.object.sha !== context.sha) throw new Error('Branch moved; do not write stale lock.');
-            let exists=false;
-            try {await github.rest.repos.getContent({owner,repo,path:'package-lock.json',ref:branch}); exists=true;}
-            catch(e) {if(e.status!==404) throw e;}
-            if(exists) {core.info('Lock already exists; no changes.'); return;}
+            const existing = await github.rest.repos.getContent({owner,repo,path:'package-lock.json',ref:branch});
             const result=await github.rest.repos.createOrUpdateFileContents({
-              owner,repo,branch,path:'package-lock.json',
-              message:'Lock resolved mobile development dependencies',
+              owner,repo,branch,path:'package-lock.json',sha:existing.data.sha,
+              message:'Apply non-breaking dependency security fixes',
               content:fs.readFileSync('package-lock.json').toString('base64')
             });
             core.info('Committed dependency lock: '+result.data.commit.sha);
