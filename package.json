@@ -18,9 +18,10 @@
     "setup": "node scripts/setup.mjs"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "55.0.32",
-    "expo-status-bar": "55.0.6",
     "expo-dev-client": "55.0.41",
+    "expo-status-bar": "55.0.6",
     "react": "19.2.0",
     "react-native": "0.83.10",
     "react-native-safe-area-context": "5.6.2"

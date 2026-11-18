@@ -1,5 +1,6 @@
-import React,{useMemo,useState} from 'react';
-import {Pressable,ScrollView,StyleSheet,Text,View} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import React,{useEffect,useMemo,useState} from 'react';
+import {Pressable,ScrollView,StyleSheet,Text,TextInput,View} from 'react-native';
 import {SafeAreaProvider,SafeAreaView} from 'react-native-safe-area-context';
 import {StatusBar} from 'expo-status-bar';
 import {areas,slots,runners} from './src/demo';
@@ -19,16 +20,49 @@ export default function App() {
   const [invitations,setInvitations]=useState<Invitation[]>([]);
   const matches=useMemo(()=>findRunners(runners,{area,pace,distance,slot,blockedIds}),[area,pace,distance,slot,blockedIds]);
   const pending=invitations.filter(i=>i.status==='pending');
+  const [name,setName]=useState('');
+  const [ready,setReady]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [notice,setNotice]=useState('');
+  useEffect(()=>{
+    let active=true;
+    async function restoreProfile() {
+      try {
+        const raw=await AsyncStorage.getItem('runnerProfile.v1');
+        if (!raw || !active) return;
+        const profile=JSON.parse(raw);
+        if (typeof profile?.name!=='string' || !areas.includes(profile.area) ||
+          !slots.includes(profile.slot) || ![3,5,10].includes(profile.distance) ||
+          ![300,360,420,null].includes(profile.pace)) throw new Error('Invalid profile');
+        setName(profile.name); setArea(profile.area); setSlot(profile.slot);
+        setPace(profile.pace); setDistance(profile.distance);
+      } catch { if(active) setNotice('Could not restore your profile. You can save it again.'); }
+      finally { if(active) setReady(true); }
+    }
+    void restoreProfile();
+    return ()=>{active=false;};
+  },[]);
+  async function saveProfile() {
+    if (!name.trim()) { setNotice('Enter a display name to save your profile.'); return; }
+    setSaving(true);
+    try {
+      await AsyncStorage.setItem('runnerProfile.v1',JSON.stringify({name:name.trim(),area,pace,distance,slot}));
+      setNotice('Running profile saved on this device.');
+    } catch { setNotice('Could not save your profile. Please try again.'); }
+    finally { setSaving(false); }
+  }
   return <SafeAreaProvider><SafeAreaView style={s.screen}>
     <StatusBar style="dark"/>
     <View style={s.top}><Text style={s.brand}>AppRunmate.</Text><Text style={s.kicker}>RUN TOGETHER</Text></View>
     <View style={s.banner}><Text style={s.notice}>DEMO · Fictional runners. No real messages or bookings.</Text></View>
     <ScrollView contentContainerStyle={s.content}>
-      {tab==='Discover'&&<>
+      {tab==='Discover'&&ready&&<>
         <Text style={s.kicker}>YOUR NEXT RUN STARTS HERE</Text>
         <Text accessibilityRole="header" style={s.title}>Find your pace.{'\n'}Find your people.</Text>
         <Text style={s.body}>A familiar route. A new running partner. Choose where and how you like to run.</Text>
         <View style={s.card}>
+          <Text accessibilityRole="header" style={s.heading}>My running profile</Text>
+          <TextInput accessibilityLabel="Display name" placeholder="Your display name" maxLength={40} value={name} onChangeText={setName} style={[s.choice,s.body]}/>
           <Text style={s.label}>WHERE ARE WE RUNNING?</Text>
           <View style={s.row}>{areas.map(v=><Choice key={v} label={v} selected={area===v} onPress={()=>setArea(v)}/>)}</View>
           <Text style={s.label}>COMFORTABLE PACE · MIN/KM</Text>
@@ -37,6 +71,8 @@ export default function App() {
           <View style={s.row}>{[3,5,10].map(v=><Choice key={v} label={v+' km'} selected={distance===v} onPress={()=>setDistance(v)}/>)}</View>
           <Text style={s.label}>WHEN IT WORKS FOR YOU</Text>
           <View style={s.row}>{slots.map(v=><Choice key={v} label={v} selected={slot===v} onPress={()=>setSlot(v)}/>)}</View>
+          <Pressable accessibilityRole="button" disabled={saving} onPress={saveProfile} style={s.button}><Text style={s.buttonText}>{saving?'Saving…':'Save profile on device'}</Text></Pressable>
+          {!!notice&&<Text accessibilityLiveRegion="polite" style={s.small}>{notice}</Text>}
         </View>
         <Text accessibilityRole="header" style={s.heading}>Your running people · {matches.length}</Text>
         <Text style={s.small}>Matches share your area, distance within 2 km and pace within 1 min/km. No live locations are shown.</Text>
@@ -63,7 +99,7 @@ export default function App() {
       </>}
       {tab==='About'&&<>
         <Text style={s.kicker}>BUILT AROUND RUNNING</Text><Text accessibilityRole="header" style={s.title}>Good company.{'\n'}Clear boundaries.</Text>
-        <View style={s.card}><Text style={s.heading}>An early mobile prototype</Text><Text style={s.body}>All profiles are fictional. No accounts, real chat, bookings or GPS tracking exist yet. Your selections and invitations reset when the app restarts.</Text></View>
+        <View style={s.card}><Text style={s.heading}>An early mobile prototype</Text><Text style={s.body}>All profiles are fictional. No accounts, real chat, bookings or GPS tracking exist yet. Your saved running profile stays on this device. Demo invitations reset on restart.</Text></View>
         <View style={s.card}><Text style={s.heading}>Running comes first</Text><Text style={s.body}>The planned pilot is for adult runners, including beginners. Choose public meeting places, agree on the route and pace, and respect each other's boundaries.</Text><Text style={s.body}>Discovery should show approximate areas. Verification is never a guarantee of personal safety.</Text></View>
         <Pressable accessibilityRole="button" style={s.button} onPress={()=>{setInvitations([]);setBlockedIds([]);}}><Text style={s.buttonText}>Reset demo activity</Text></Pressable>
       </>}
