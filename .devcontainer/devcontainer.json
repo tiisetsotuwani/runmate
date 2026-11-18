@@ -1,0 +1,22 @@
+{
+  "name": "AppRunmate development",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:3-22",
+  "remoteUser": "node",
+  "forwardPorts": [
+    8081
+  ],
+  "portsAttributes": {
+    "8081": {
+      "label": "Expo Metro",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "npm run setup",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "expo.vscode-expo-tools"
+      ]
+    }
+  }
+}

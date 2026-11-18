@@ -1,0 +1,44 @@
+# Temporary bootstrap workflow; remove once the generated lock is committed.
+name: Bootstrap dependency lock
+on:
+  push:
+    branches: ['codex/apprunmate-foundation']
+    paths: ['.github/workflows/bootstrap-lock.yml']
+permissions:
+  contents: write
+concurrency:
+  group: bootstrap-lock
+  cancel-in-progress: false
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve lock without running dependency scripts
+        run: |
+          npm audit fix --package-lock-only --ignore-scripts || true
+          git diff --exit-code -- package.json
+          npm audit --audit-level=high
+      - name: Commit lock only when branch has not moved
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = 'codex/apprunmate-foundation';
+            const ref = await github.rest.git.getRef({owner,repo,ref:'heads/'+branch});
+            if(ref.data.object.sha !== context.sha) throw new Error('Branch moved; do not write stale lock.');
+            const existing = await github.rest.repos.getContent({owner,repo,path:'package-lock.json',ref:branch});
+            const result=await github.rest.repos.createOrUpdateFileContents({
+              owner,repo,branch,path:'package-lock.json',sha:existing.data.sha,
+              message:'Apply non-breaking dependency security fixes',
+              content:fs.readFileSync('package-lock.json').toString('base64')
+            });
+            core.info('Committed dependency lock: '+result.data.commit.sha);
