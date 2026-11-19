@@ -1,125 +1,162 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React,{useEffect,useMemo,useState} from 'react';
-import {Pressable,ScrollView,StyleSheet,Text,TextInput,View} from 'react-native';
-import {SafeAreaProvider,SafeAreaView} from 'react-native-safe-area-context';
-import {StatusBar} from 'expo-status-bar';
-import {areas,slots,runners} from './src/demo';
-import {findRunners,formatPace,updateInvitation} from './src/domain.mjs';
-import type {Invitation} from './src/domain.mjs';
-type Tab='Discover'|'My runs'|'About';
-function Choice({label,selected,onPress}:{label:string;selected:boolean;onPress:()=>void}) {
-  return <Pressable accessibilityRole="button" accessibilityState={{selected}} onPress={onPress} style={[s.choice,selected&&s.selected]}><Text style={[s.choiceText,selected&&s.white]}>{label}</Text></Pressable>;
+import { File, Paths } from 'expo-file-system';
+import { StatusBar } from 'expo-status-bar';
+import React, { useEffect, useRef, useState } from 'react';
+import { Animated, Image, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { LiveRunners } from './src/LiveRunners';
+import { areas, runners, slots } from './src/demo';
+import { findRunners, formatPace } from './src/domain.mjs';
+import type { Runner } from './src/domain.mjs';
+
+const photos: Record<string, number> = {
+  'demo-1': require('./assets/runners/demo-1.jpg'),
+  'demo-2': require('./assets/runners/demo-2.jpg'),
+  'demo-3': require('./assets/runners/demo-3.jpg'),
+  'demo-4': require('./assets/runners/demo-4.jpg'),
+  'demo-5': require('./assets/runners/demo-5.jpg'),
+  'demo-6': require('./assets/runners/demo-6.jpg'),
+};
+const sampleLikes = ['demo-1', 'demo-4', 'demo-5'];
+const tabs = ['Discover', 'Matches', 'Profile', 'Live'] as const;
+type Tab = typeof tabs[number];
+type Profile = { name: string; area: string; distance: number; pace: number|null; slot: string; bio: string; photo: string };
+type Activity = { choices: Record<string,'pass'|'like'>; chats: Record<string,string[]> };
+const defaults: Profile = {name:'', area:areas[0], distance:5, pace:360, slot:slots[0], bio:'', photo:''};
+const empty: Activity = {choices:{}, chats:{}};
+const activityKey = 'runnerActivity.v2';
+const profileKey = 'runnerProfile.v1';
+
+function Action({label,onPress,secondary=false}:{label:string;onPress:()=>void;secondary?:boolean}) {
+  return <Pressable accessibilityRole="button" onPress={onPress} style={[s.button,secondary&&s.secondary]}>
+    <Text style={s.buttonText}>{label}</Text></Pressable>;
+}
+function Select({title,values,selected,change}:{title:string;values:string[];selected:string;change:(value:string)=>void}) {
+  return <View style={s.group}><Text style={s.label}>{title}</Text><View style={s.row}>{values.map(value=>
+    <Pressable accessibilityRole="button" accessibilityState={{selected:selected===value}} style={[s.chip,selected===value&&s.on]} key={value} onPress={()=>change(value)}>
+      <Text style={s.ink}>{value}</Text></Pressable>)}</View></View>;
+}
+function RunnerCard({runner,choose}:{runner:Runner;choose:(like:boolean)=>void}) {
+  const x=useRef(new Animated.Value(0)).current;
+  const gesture=PanResponder.create({
+    onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>10 && Math.abs(g.dx)>1.4*Math.abs(g.dy),
+    onPanResponderMove:(_,g)=>x.setValue(g.dx),
+    onPanResponderTerminationRequest:()=>false,
+    onPanResponderTerminate:()=>x.setValue(0),
+    onPanResponderRelease:(_,g)=>{
+      if(Math.abs(g.dx)>=70) choose(g.dx>0);
+      else Animated.spring(x,{toValue:0,useNativeDriver:true}).start();
+    },
+  });
+  return <><Animated.View {...gesture.panHandlers} style={[s.card,{transform:[{translateX:x},{rotate:x.interpolate({inputRange:[-180,180],outputRange:['-8deg','8deg'],extrapolate:'clamp'})}]}]}>
+    <Image source={photos[runner.id]} accessibilityLabel={'Sample portrait for '+runner.name} style={s.hero}/>
+    <View style={s.details}><Text style={s.location}>{runner.area.toUpperCase()}</Text><Text style={s.name}>{runner.name}</Text>
+    <Text style={s.metrics}>{runner.distance} km   ·   {formatPace(runner.pace)} /km   ·   {runner.slot}</Text><Text style={[s.body,{color:'#dce7dc'}]}>{runner.bio}</Text></View>
+  </Animated.View>
+  <View style={s.actions}><Action label="←  Pass" secondary onPress={()=>choose(false)}/><Action label="Like runner  →" onPress={()=>choose(true)}/></View></>;
 }
 export default function App() {
   const [tab,setTab]=useState<Tab>('Discover');
-  const [area,setArea]=useState(areas[0]);
-  const [pace,setPace]=useState<number|null>(360);
-  const [distance,setDistance]=useState(5);
-  const [slot,setSlot]=useState('Any time');
-  const [blockedIds,setBlockedIds]=useState<string[]>([]);
-  const [invitations,setInvitations]=useState<Invitation[]>([]);
-  const matches=useMemo(()=>findRunners(runners,{area,pace,distance,slot,blockedIds}),[area,pace,distance,slot,blockedIds]);
-  const pending=invitations.filter(i=>i.status==='pending');
-  const [name,setName]=useState('');
-  const [ready,setReady]=useState(false);
-  const [saving,setSaving]=useState(false);
+  const [profile,setProfile]=useState<Profile>(defaults);
+  const [activity,setActivity]=useState<Activity>(empty);
+  const [thread,setThread]=useState('');
+  const [draft,setDraft]=useState('');
   const [notice,setNotice]=useState('');
+  const [ready,setReady]=useState(false);
+  const writeQueue=useRef(Promise.resolve());
   useEffect(()=>{
     let active=true;
-    async function restoreProfile() {
-      try {
-        const raw=await AsyncStorage.getItem('runnerProfile.v1');
-        if (!raw || !active) return;
-        const profile=JSON.parse(raw);
-        if (typeof profile?.name!=='string' || !areas.includes(profile.area) ||
-          !slots.includes(profile.slot) || ![3,5,10].includes(profile.distance) ||
-          ![300,360,420,null].includes(profile.pace)) throw new Error('Invalid profile');
-        setName(profile.name); setArea(profile.area); setSlot(profile.slot);
-        setPace(profile.pace); setDistance(profile.distance);
-      } catch { if(active) setNotice('Could not restore your profile. You can save it again.'); }
-      finally { if(active) setReady(true); }
-    }
-    void restoreProfile();
-    return ()=>{active=false;};
+    AsyncStorage.multiGet([profileKey,activityKey]).then(([[,p],[,a]])=>{
+      if(!active)return;
+      if(p){
+        const old=JSON.parse(p);
+        if(areas.includes(old.area)&&slots.includes(old.slot)&&[3,5,10].includes(old.distance)&&[300,360,420,null].includes(old.pace))
+          setProfile({...defaults,...old});
+      }
+      if(a){const data=JSON.parse(a);if(data?.choices&&data?.chats)setActivity(data);}
+    }).catch(()=>{if(active)setNotice('Could not load your saved demo.');}).finally(()=>{if(active)setReady(true)});
+    return ()=>{active=false};
   },[]);
-  async function saveProfile() {
-    if (!name.trim()) { setNotice('Enter a display name to save your profile.'); return; }
-    setSaving(true);
-    try {
-      await AsyncStorage.setItem('runnerProfile.v1',JSON.stringify({name:name.trim(),area,pace,distance,slot}));
-      setNotice('Running profile saved on this device.');
-    } catch { setNotice('Could not save your profile. Please try again.'); }
-    finally { setSaving(false); }
+  useEffect(()=>{
+    if(ready) writeQueue.current=writeQueue.current.then(()=>AsyncStorage.setItem(activityKey,JSON.stringify(activity)))
+      .catch(()=>setNotice('Could not save this activity on your device.'));
+  },[activity,ready]);
+  const candidates=findRunners(runners,profile).filter(r=>!activity.choices[r.id]);
+  const matches=runners.filter(r=>sampleLikes.includes(r.id)&&activity.choices[r.id]==='like');
+  const partner=matches.find(r=>r.id===thread);
+  function choose(like:boolean) {
+    const runner=candidates[0];
+    if(!runner)return;
+    setActivity(a=>({...a,choices:{...a.choices,[runner.id]:like?'like':'pass'}}));
+    setNotice(like&&sampleLikes.includes(runner.id)?'Demo match with '+runner.name+'! Open Matches to chat.':'');
   }
-  return <SafeAreaProvider><SafeAreaView style={s.screen}>
-    <StatusBar style="dark"/>
-    <View style={s.top}><Text style={s.brand}>AppRunmate.</Text><Text style={s.kicker}>RUN TOGETHER</Text></View>
-    <View style={s.banner}><Text style={s.notice}>DEMO · Fictional runners. No real messages or bookings.</Text></View>
-    <ScrollView contentContainerStyle={s.content}>
-      {tab==='Discover'&&ready&&<>
-        <Text style={s.kicker}>YOUR NEXT RUN STARTS HERE</Text>
-        <Text accessibilityRole="header" style={s.title}>Find your pace.{'\n'}Find your people.</Text>
-        <Text style={s.body}>A familiar route. A new running partner. Choose where and how you like to run.</Text>
-        <View style={s.card}>
-          <Text accessibilityRole="header" style={s.heading}>My running profile</Text>
-          <TextInput accessibilityLabel="Display name" placeholder="Your display name" maxLength={40} value={name} onChangeText={setName} style={[s.choice,s.body]}/>
-          <Text style={s.label}>WHERE ARE WE RUNNING?</Text>
-          <View style={s.row}>{areas.map(v=><Choice key={v} label={v} selected={area===v} onPress={()=>setArea(v)}/>)}</View>
-          <Text style={s.label}>COMFORTABLE PACE · MIN/KM</Text>
-          <View style={s.row}>{[300,360,420,null].map(v=><Choice key={String(v)} label={v===null?'Not sure yet':formatPace(v)} selected={pace===v} onPress={()=>setPace(v)}/>)}</View>
-          <Text style={s.label}>DISTANCE</Text>
-          <View style={s.row}>{[3,5,10].map(v=><Choice key={v} label={v+' km'} selected={distance===v} onPress={()=>setDistance(v)}/>)}</View>
-          <Text style={s.label}>WHEN IT WORKS FOR YOU</Text>
-          <View style={s.row}>{slots.map(v=><Choice key={v} label={v} selected={slot===v} onPress={()=>setSlot(v)}/>)}</View>
-          <Pressable accessibilityRole="button" disabled={saving} onPress={saveProfile} style={s.button}><Text style={s.buttonText}>{saving?'Saving…':'Save profile on device'}</Text></Pressable>
-          {!!notice&&<Text accessibilityLiveRegion="polite" style={s.small}>{notice}</Text>}
-        </View>
-        <Text accessibilityRole="header" style={s.heading}>Your running people · {matches.length}</Text>
-        <Text style={s.small}>Matches share your area, distance within 2 km and pace within 1 min/km. No live locations are shown.</Text>
-        {matches.length===0&&<View style={s.card}><Text style={s.heading}>A little quiet here</Text><Text style={s.body}>Try another area, time, pace or distance to explore more sample runners.</Text></View>}
-        {matches.map(r=>{
-          const sent=pending.some(i=>i.runnerId===r.id);
-          return <View key={r.id} style={s.card}>
-            <View style={s.row}><View style={s.avatar}><Text style={s.avatarText}>{r.name[0]}</Text></View><View style={{flex:1}}><Text style={s.heading}>{r.name}</Text><Text style={s.small}>{r.area} · Sample profile</Text></View></View>
-            <Text style={s.body}>{r.bio}</Text>
-            <View style={s.row}><Text style={s.pill}>{formatPace(r.pace)} /km</Text><Text style={s.pill}>{r.distance} km</Text><Text style={s.pill}>{r.slot}</Text></View>
-            <Pressable accessibilityRole="button" accessibilityState={{disabled:sent}} accessibilityLabel={'Demo invitation to '+r.name} disabled={sent} onPress={()=>setInvitations(items=>updateInvitation(items,r.id,'invite'))} style={[s.button,sent&&s.disabled]}><Text style={s.buttonText}>{sent?'Demo invitation pending':'Invite for a run →'}</Text></Pressable>
-            <Pressable accessibilityRole="button" style={s.linkButton} onPress={()=>{setBlockedIds(ids=>[...new Set([...ids,r.id])]);setInvitations(items=>updateInvitation(items,r.id,'cancel'));}}><Text style={s.link}>Hide sample runner</Text></Pressable>
-          </View>;
-        })}
-      </>}
-      {tab==='My runs'&&<>
-        <Text style={s.kicker}>MAKE TIME FOR THE MILES</Text><Text accessibilityRole="header" style={s.title}>My runs</Text>
-        <Text style={s.body}>Local demo invitations only. Nothing is sent to another person, and no run is confirmed.</Text>
-        {!pending.length&&<View style={s.card}><Text style={s.heading}>Your next run is ahead of you</Text><Text style={s.body}>Open Discover to try inviting a sample runner.</Text></View>}
-        {pending.map(i=>{
-          const r=runners.find(r=>r.id===i.runnerId)!;
-          return <View key={r.id} style={s.card}><Text style={s.kicker}>DEMO · PENDING</Text><Text style={s.heading}>Run with {r.name}</Text><Text style={s.body}>{r.area} · {r.distance} km · {formatPace(r.pace)} /km</Text><Text style={s.small}>No date or public meeting place has been agreed. Real invitations will require both.</Text><Pressable accessibilityRole="button" style={s.linkButton} onPress={()=>setInvitations(items=>updateInvitation(items,r.id,'cancel'))}><Text style={s.link}>Cancel demo invitation</Text></Pressable></View>;
-        })}
-      </>}
-      {tab==='About'&&<>
-        <Text style={s.kicker}>BUILT AROUND RUNNING</Text><Text accessibilityRole="header" style={s.title}>Good company.{'\n'}Clear boundaries.</Text>
-        <View style={s.card}><Text style={s.heading}>An early mobile prototype</Text><Text style={s.body}>All profiles are fictional. No accounts, real chat, bookings or GPS tracking exist yet. Your saved running profile stays on this device. Demo invitations reset on restart.</Text></View>
-        <View style={s.card}><Text style={s.heading}>Running comes first</Text><Text style={s.body}>The planned pilot is for adult runners, including beginners. Choose public meeting places, agree on the route and pace, and respect each other's boundaries.</Text><Text style={s.body}>Discovery should show approximate areas. Verification is never a guarantee of personal safety.</Text></View>
-        <Pressable accessibilityRole="button" style={s.button} onPress={()=>{setInvitations([]);setBlockedIds([]);}}><Text style={s.buttonText}>Reset demo activity</Text></Pressable>
-      </>}
-      <Text style={s.footer}>STRICTLY FOR RUNNERS · START WITH ONE GOOD RUN</Text>
-    </ScrollView>
-    <View style={s.tabs}>{(['Discover','My runs','About'] as const).map(v=><Pressable key={v} accessibilityRole="tab" accessibilityState={{selected:tab===v}} onPress={()=>setTab(v)} style={[s.tab,tab===v&&s.activeTab]}><Text style={s.tabText}>{v}{v==='My runs'&&pending.length?' ('+pending.length+')':''}</Text></Pressable>)}</View>
-  </SafeAreaView></SafeAreaProvider>;
+  function openTab(next:Tab){setTab(next);setThread('');setDraft('');setNotice('');}
+  function edit<K extends keyof Profile>(key:K,value:Profile[K]){setProfile(p=>({...p,[key]:value}));setNotice('');}
+  async function pickPhoto(){
+    try{
+      const selection=await File.pickFileAsync(undefined,'image/*');
+      const file=Array.isArray(selection)?selection[0]:selection;
+      if(!file)return;
+      if(file.size>6*1024*1024){setNotice('Choose a picture smaller than 6 MB.');return;}
+      await Image.getSize(file.uri);
+      const target=new File(Paths.document,'runner-'+Date.now()+'.'+(file.extension.replace(/[^a-zA-Z0-9]/g,'')||'jpg'));
+      file.copy(target);
+      edit('photo',target.uri);setNotice('Picture selected. Save your profile to keep it.');
+    } catch(error) {if(!String(error).toLowerCase().includes('cancel'))setNotice('Could not open that picture. Try a JPEG or PNG file.');}
+  }
+  async function saveProfile(){
+    if(!profile.name.trim()){setNotice('Enter your running name first.');return;}
+    try{await AsyncStorage.setItem(profileKey,JSON.stringify({...profile,name:profile.name.trim()}));setNotice('Profile saved on this device.');}
+    catch{setNotice('Profile could not be saved.');}
+  }
+  function send(){
+    const text=draft.trim();
+    if(!partner||!text)return;
+    setActivity(a=>({...a,chats:{...a.chats,[partner.id]:[...(a.chats[partner.id]||[]),text]}}));setDraft('');
+  }
+  return <SafeAreaProvider><SafeAreaView style={s.screen}><StatusBar style="dark"/>
+    <View style={s.top}><Text style={s.brand}>AppRunmate</Text><Text style={s.demo}>{tab==='Live'?'LIVE':'RUNNER DEMO'}</Text></View>
+    {tab==='Live'?<LiveRunners/>:<ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.page}>
+      {!ready?<Text>Loading your profile…</Text>:<>
+      {tab==='Discover'&&<><Text style={s.title}>Find your partner.</Text><Text style={s.sub}>Swipe right to like a runner or left to pass.</Text>
+        {candidates[0]?<RunnerCard key={candidates[0].id} runner={candidates[0]} choose={choose}/>:<View style={s.box}><Text style={s.head}>You’re all caught up.</Text><Text style={s.body}>Change your running preferences to see more sample runners.</Text>
+        <Action label="Edit preferences" onPress={()=>openTab('Profile')}/></View>}</>}
+      {tab==='Matches'&&<><Text style={s.title}>{partner?partner.name:'Your matches.'}</Text>
+        {partner?<><Action secondary label="←  All matches" onPress={()=>{setThread('');setDraft('')}}/>
+        <Text style={s.sub}>Demo conversation · messages stay on this device.</Text>
+        {(activity.chats[partner.id]||[]).map((message,i)=><Text key={i} style={s.bubble}>{message}</Text>)}
+        <TextInput accessibilityLabel="Message" placeholder="Ask about the next run…" style={s.input} multiline maxLength={1000} value={draft} onChangeText={setDraft}/><Action label="Send demo message" onPress={send}/></>:
+        <><Text style={s.sub}>A chat opens when both runners like each other. Mutual likes here are simulated.</Text>
+        {!matches.length&&<Text style={s.body}>Like a runner in Discover to try matching.</Text>}
+        {matches.map(r=><Pressable key={r.id} accessibilityRole="button" onPress={()=>setThread(r.id)} style={s.match}>
+          <Image source={photos[r.id]} style={s.avatar}/><View style={{flex:1}}><Text style={s.head}>{r.name}</Text><Text numberOfLines={1} style={s.body}>{activity.chats[r.id]?.at(-1)||r.area}</Text></View><Text>Chat →</Text></Pressable>)}</>}</>}
+      {tab==='Profile'&&<><Text style={s.title}>Runner profile.</Text><View style={s.box}>
+        {profile.photo?<Image source={{uri:profile.photo}} style={s.profilePic} accessibilityLabel="Your selected profile photo"/>:null}
+        <Action secondary label={profile.photo?'Change profile picture':'Choose a profile picture'} onPress={pickPhoto}/>
+        <Text style={s.label}>Running name</Text><TextInput style={s.input} accessibilityLabel="Running name" placeholder="Your name" maxLength={40} value={profile.name} onChangeText={v=>edit('name',v)}/>
+        <Text style={s.label}>About your running</Text><TextInput style={s.input} accessibilityLabel="About your running" placeholder="What makes a good run for you?" multiline maxLength={250} value={profile.bio} onChangeText={v=>edit('bio',v)}/>
+        <Select title="Area" values={areas} selected={profile.area} change={v=>edit('area',v)}/>
+        <Select title="Distance (km)" values={['3','5','10']} selected={String(profile.distance)} change={v=>edit('distance',Number(v))}/>
+        <Select title="Pace per km" values={['5:00','6:00','7:00','Any']} selected={profile.pace?formatPace(profile.pace):'Any'} change={v=>edit('pace',v==='Any'?null:parseInt(v)*60)}/>
+        <Select title="Availability" values={slots} selected={profile.slot} change={v=>edit('slot',v)}/>
+        <Action label="Save profile" onPress={saveProfile}/></View>
+        <Action secondary label="Reset demo likes and messages" onPress={()=>{setActivity(empty);setNotice('Demo activity reset.')}}/></>}
+      {!!notice&&<Text accessibilityLiveRegion="polite" style={s.status}>{notice}</Text>}</>}
+    </ScrollView>}<View style={s.tabs}>{tabs.map(t=><Pressable key={t} accessibilityRole="tab" accessibilityState={{selected:t===tab}} onPress={()=>openTab(t)} style={[s.tab,t===tab&&s.on]}><Text style={s.buttonText}>{t}</Text></Pressable>)}</View>
+    </SafeAreaView></SafeAreaProvider>;
 }
 const s=StyleSheet.create({
-  screen:{flex:1,backgroundColor:'#F7F8F2'},top:{paddingHorizontal:22,paddingVertical:16,flexDirection:'row',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8},
-  brand:{fontSize:25,fontWeight:'900',color:'#173C32',letterSpacing:-1},kicker:{fontSize:10,fontWeight:'800',letterSpacing:1.5,color:'#476445'},
-  banner:{backgroundColor:'#E6EEDC',paddingHorizontal:22,paddingVertical:10},notice:{fontSize:12,lineHeight:18,color:'#294332',fontWeight:'600'},
-  content:{padding:22,gap:16,maxWidth:680,width:'100%',alignSelf:'center'},title:{fontSize:38,lineHeight:43,fontWeight:'900',color:'#173C32',letterSpacing:-1.2},
-  body:{fontSize:15,lineHeight:24,color:'#43594B'},small:{fontSize:12,lineHeight:19,color:'#526257'},card:{padding:19,borderRadius:22,backgroundColor:'#FFFFFF',borderWidth:1,borderColor:'#E0E6DA',gap:14},
-  label:{fontSize:10,fontWeight:'800',letterSpacing:1,color:'#466254'},row:{flexDirection:'row',flexWrap:'wrap',alignItems:'center',gap:8},
-  choice:{minHeight:44,paddingHorizontal:14,paddingVertical:12,borderRadius:22,borderWidth:1,borderColor:'#D9E0D4',justifyContent:'center'},selected:{backgroundColor:'#173C32',borderColor:'#173C32'},choiceText:{fontSize:13,color:'#334C3D',fontWeight:'600'},white:{color:'#FFFFFF'},
-  heading:{fontSize:20,fontWeight:'800',color:'#173C32'},avatar:{width:48,height:48,borderRadius:24,backgroundColor:'#E6EEDC',alignItems:'center',justifyContent:'center'},avatarText:{fontSize:21,color:'#294332',fontWeight:'800'},
-  pill:{backgroundColor:'#F0F4E9',paddingHorizontal:10,paddingVertical:7,borderRadius:9,fontSize:12,color:'#294332',fontWeight:'600'},
-  button:{minHeight:48,borderRadius:14,backgroundColor:'#173C32',padding:14,alignItems:'center',justifyContent:'center'},disabled:{backgroundColor:'#526257'},buttonText:{color:'#FFFFFF',fontSize:14,fontWeight:'700',textAlign:'center'},
-  linkButton:{minHeight:44,alignItems:'center',justifyContent:'center'},link:{fontSize:13,color:'#345C40',textDecorationLine:'underline'},
-  tabs:{flexDirection:'row',padding:8,borderTopWidth:1,borderTopColor:'#DDE4D7',backgroundColor:'#FFFFFF',gap:6},tab:{flex:1,minHeight:48,justifyContent:'center',alignItems:'center',borderRadius:14},activeTab:{backgroundColor:'#E6EEDC'},tabText:{fontSize:13,fontWeight:'700',color:'#173C32'},
-  footer:{fontSize:9,lineHeight:16,letterSpacing:1,color:'#526257',textAlign:'center',marginVertical:14}
+  screen:{flex:1,backgroundColor:'#f6f6ef'},top:{paddingHorizontal:22,paddingVertical:14,flexDirection:'row',alignItems:'center',justifyContent:'space-between'},
+  brand:{fontSize:23,fontWeight:'900',letterSpacing:-1,color:'#1c3027'},demo:{fontSize:10,letterSpacing:1,fontWeight:'700',color:'#4c5d51'},
+  page:{padding:20,gap:14,maxWidth:620,width:'100%',alignSelf:'center'},title:{fontSize:38,fontWeight:'900',letterSpacing:-1.8,color:'#162d23'},sub:{fontSize:15,lineHeight:22,color:'#526054'},
+  card:{backgroundColor:'#193226',borderRadius:25,overflow:'hidden'},hero:{width:'100%',aspectRatio:1.35},details:{padding:20,gap:7},location:{color:'#c7f677',fontSize:11,fontWeight:'800',letterSpacing:1.3},
+  name:{fontSize:34,fontWeight:'900',letterSpacing:-1.2,color:'white'},metrics:{fontSize:14,fontWeight:'700',color:'white'},body:{fontSize:15,lineHeight:22,color:'#516256'},
+  actions:{flexDirection:'row',justifyContent:'space-evenly',gap:8},button:{paddingHorizontal:18,paddingVertical:14,minHeight:46,borderRadius:20,backgroundColor:'#b8e968',alignItems:'center',justifyContent:'center'},
+  secondary:{backgroundColor:'#e6e9df'},buttonText:{fontWeight:'700',color:'#203126',fontSize:15},box:{padding:18,gap:12,borderRadius:20,backgroundColor:'white'},
+  head:{fontSize:20,fontWeight:'800',color:'#1c3225'},label:{fontSize:14,fontWeight:'700',color:'#26382a'},row:{flexDirection:'row',flexWrap:'wrap',gap:6},group:{gap:6},
+  input:{padding:12,minHeight:46,borderWidth:1,borderColor:'#c5cfc2',borderRadius:12,color:'#192e21'},chip:{paddingHorizontal:12,minHeight:44,justifyContent:'center',borderRadius:16,backgroundColor:'#eff1ec'},
+  on:{backgroundColor:'#d2edaa'},ink:{color:'#26382a',fontWeight:'600'},tabs:{flexDirection:'row',padding:8,gap:4,borderTopWidth:1,borderColor:'#dae0d7',backgroundColor:'white'},
+  tab:{flex:1,alignItems:'center',justifyContent:'center',minHeight:48,borderRadius:16},avatar:{width:60,height:60,borderRadius:20},
+  profilePic:{width:112,height:112,borderRadius:24,alignSelf:'center'},match:{padding:12,flexDirection:'row',gap:12,backgroundColor:'white',alignItems:'center',borderRadius:18},
+  bubble:{maxWidth:'85%',alignSelf:'flex-end',backgroundColor:'#ddedc8',borderRadius:16,padding:12,color:'#213323'},status:{color:'#26461e',fontWeight:'700',lineHeight:21}
 });
